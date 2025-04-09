@@ -1,0 +1,4 @@
+# No external dependencies required
+# Python 3.7 or higher is required
+
+coverage

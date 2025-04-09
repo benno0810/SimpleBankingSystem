@@ -2,13 +2,25 @@
 import csv
 import os
 from tempfile import NamedTemporaryFile
+from datetime import datetime, timezone
+from decimal import Decimal
+
+def get_data_dir():
+    """Get the data directory from environment variable or use default."""
+    return os.getenv('DATA_DIR', '.')
+
+def get_file_path(filename):
+    """Get the full path for a file in the data directory."""
+    return os.path.join(get_data_dir(), filename)
 
 def save_accounts(accounts, filename='accounts.csv'):
     """
     Save account summaries into a CSV file.
     Each account is represented by its id, name, initial_balance, current_balance,
     created_at and updated_at.
+    todo: this is a snapshot table. convert accounts to a slow changing dimension (confirming features)
     """
+    filepath = get_file_path(filename)
     temp_file = NamedTemporaryFile('w', delete=False, newline='', encoding='utf-8')
     with temp_file as csvfile:
         writer = csv.writer(csvfile)
@@ -22,13 +34,14 @@ def save_accounts(accounts, filename='accounts.csv'):
                 account.created_at.isoformat(),
                 account.updated_at.isoformat()
             ])
-    os.replace(temp_file.name, filename)
+    os.replace(temp_file.name, filepath)
 
 def save_transactions(accounts, filename='transactions.csv'):
     """
     Save all transactions from all accounts into a CSV file.
     Each row represents one transaction, along with its account_id.
     """
+    filepath = get_file_path(filename)
     temp_file = NamedTemporaryFile('w', delete=False, newline='', encoding='utf-8')
     with temp_file as csvfile:
         writer = csv.writer(csvfile)
@@ -41,53 +54,55 @@ def save_transactions(accounts, filename='transactions.csv'):
                     txn.txn_status,
                     str(txn.amount),
                     txn.description,
-                    txn.timestamp.isoformat()
+                    txn.timestamp.isoformat() if isinstance(txn.timestamp, datetime) else txn.timestamp
                 ])
-    os.replace(temp_file.name, filename)
+    os.replace(temp_file.name, filepath)
 
 def load_accounts(filename='accounts.csv'):
     """
-    Read account data from a CSV file and return a dictionary of BankAccount objects.
-    (Implementation detail: You must recreate your BankAccount from the CSV data.)
+    Load account data from CSV into a dictionary mapping account_id to BankAccount.
+    Note: We assume that BankAccount is constructed with the initial_balance.
     """
-    from entities import BankAccount  # Import here to avoid circular dependency if needed.
     accounts = {}
+    filepath = get_file_path(filename)
     try:
-        with open(filename, newline='', encoding='utf-8') as csvfile:
+        with open(filepath, newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
+            from entities import BankAccount  # delayed import to avoid circular dependency
             for row in reader:
-                # Create a new BankAccount; note that account_balance is computed via transactions,
-                # but we record it here as a snapshot.
                 account = BankAccount(
                     account_id=row['account_id'],
                     account_name=row['account_name'],
-                    initial_balance=row['initial_balance']
+                    initial_balance=Decimal(row['initial_balance'])
                 )
-                account.account_balance = row['account_balance']  # stored as string—convert if necessary
-                # You can also parse created_at and updated_at if needed.
+                # Restore the snapshot balance; note that the balance will be recomputed once transactions are loaded.
+                account.account_balance = Decimal(row['account_balance'])
+                # In a more advanced system, you would also parse created_at and updated_at
+                account.created_at = datetime.fromisoformat(row['created_at'])
+                account.updated_at = datetime.fromisoformat(row['updated_at'])
                 accounts[account.account_id] = account
     except FileNotFoundError:
-        # If file not found, return empty accounts dictionary.
+        # If file not found, return an empty dict.
         pass
     return accounts
 
 def load_transactions(accounts, filename='transactions.csv'):
     """
     Load transactions from CSV and assign them to the corresponding accounts.
-    (This assumes that an account already exists in the accounts dictionary.)
+    This assumes that the account dictionary has been loaded (or created) first.
     """
-    from entities import Transaction
+    filepath = get_file_path(filename)
     try:
-        with open(filename, newline='', encoding='utf-8') as csvfile:
+        with open(filepath, newline='', encoding='utf-8') as csvfile:
             reader = csv.DictReader(csvfile)
+            from entities import Transaction  # delayed import to avoid circular dependency
             for row in reader:
-                # Assuming that Transaction() accepts amount as a number (Decimal or float)
                 txn = Transaction(
                     txn_type=row['txn_type'],
                     txn_status=row['txn_status'],
-                    amount=row['amount'],  # conversion may be needed
+                    amount=Decimal(row['amount']),
                     description=row['description'],
-                    timestamp=row['timestamp']  # conversion to datetime if needed
+                    timestamp=datetime.fromisoformat(row['timestamp'])
                 )
                 account_id = row['account_id']
                 if account_id in accounts:

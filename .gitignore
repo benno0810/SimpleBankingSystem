@@ -1,0 +1,5 @@
+SimpleBankingSystem/accounts.csv
+SimpleBankingSystem/transactions.csv
+SimpleBankingSystem/__pycache__
+SimpleBankingSystem/*.pyc
+ReadMe.md

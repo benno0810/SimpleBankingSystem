@@ -2,19 +2,35 @@
 from datetime import datetime, timezone
 from decimal import Decimal, getcontext
 import uuid
+from threading import Lock
+from SimpleBankingSystem.constants import TransactionType, TransactionStatus
+from SimpleBankingSystem.transaction_log import TransactionLog
+from typing import List, Optional
+from SimpleBankingSystem.models import Transaction
+
 getcontext().prec = 2  # Precision up to cents
 
+# Create a single transaction log instance
+transaction_log = TransactionLog()
+
 class Transaction:
-    def __init__(self, txn_type, txn_status, amount, description="", timestamp=None):
+    def __init__(self, txn_type: TransactionType, txn_status: TransactionStatus, amount: Decimal, description: str = ""):
         self.transaction_id = str(uuid.uuid4())
         self.txn_type = txn_type
         self.txn_status = txn_status
-        self.amount = Decimal(amount)
+        self.amount = amount
         self.description = description
-        self.timestamp = timestamp if timestamp else datetime.now(timezone.utc)
+        self.timestamp = datetime.now(timezone.utc)
         self.error_message = None
+        self.balance_updated = False  # Track if this transaction has affected the balance
 
-    def update_status(self, new_status, error_message=None):
+    def get_effective_amount(self):
+        """Return the amount with the correct sign based on transaction type"""
+        if self.txn_type == TransactionType.WITHDRAW:
+            return -self.amount
+        return self.amount
+
+    def update_status(self, new_status: TransactionStatus, error_message: Optional[str] = None):
         """Update the transaction status and optionally set an error message."""
         self.txn_status = new_status
         if error_message:
@@ -24,69 +40,114 @@ class Transaction:
         return f"Transaction(id={self.transaction_id}, type={self.txn_type}, status={self.txn_status}, amount={self.amount}, timestamp={self.timestamp})"
 
 class BankAccount:
-    def __init__(self, account_name, initial_balance):
-        self.account_id = str(uuid.uuid4())
-        self.account_name = account_name
-        self.initial_balance = Decimal(initial_balance)
-        self.account_balance = self.initial_balance
-        self.transactions = []
+    def __init__(self, account_id: str, name: str, initial_balance: Decimal = Decimal('0.00')):
+        self.account_id = account_id
+        self.name = name
+        self.initial_balance = initial_balance
+        self.account_balance = initial_balance
+        self.transactions: List[Transaction] = []
         self.created_at = datetime.now(timezone.utc)
         self.updated_at = self.created_at
+        self._lock = Lock()
+        self._transaction_limit = 1000
 
-    def apply_transaction(self, transaction: Transaction):
-        """Apply a transaction to the account, handling different transaction states."""
-        from constants import TransactionStatus
-        
-        self.updated_at = transaction.timestamp
-        
-        if transaction.txn_status == TransactionStatus.PENDING:
-            # Queue the transaction for processing
+    def apply_transaction(self, transaction: Transaction) -> None:
+        """Apply a transaction to the account"""
+        with self._lock:
+            if transaction.txn_status == TransactionStatus.COMPLETED:
+                self.account_balance += transaction.amount
+            # Simply append to transactions queue
             self.transactions.append(transaction)
+            self.updated_at = datetime.now(timezone.utc)
             
-        elif transaction.txn_status == TransactionStatus.PROCESSING:
-            # Transaction is being processed
-            self.transactions.append(transaction)
-            
-        elif transaction.txn_status == TransactionStatus.COMPLETED:
-            # Transaction is completed, update balance
-            self.transactions.append(transaction)
-            self.account_balance += transaction.amount
-            
-        elif transaction.txn_status == TransactionStatus.FAILED:
-            # Transaction failed, log it but don't update balance
-            self.transactions.append(transaction)
+            # Archive old transactions if we exceed the limit
+            if len(self.transactions) > self._transaction_limit:
+                self._archive_transactions()
 
-    def get_balance(self):
-        """Get the current account balance, considering only completed transactions."""
-        from constants import TransactionStatus
-        completed_amount = sum(
-            txn.amount for txn in self.transactions 
-            if txn.txn_status == TransactionStatus.COMPLETED
-        )
-        return self.initial_balance + completed_amount
-
-    def get_statement(self):
-        """Get account statement with transaction history and running balance."""
-        from constants import TransactionStatus
-        running_balance = self.initial_balance
-        statement = []
-        
-        for txn in sorted(self.transactions, key=lambda t: t.timestamp):
-            if txn.txn_status == TransactionStatus.COMPLETED:
-                running_balance += txn.amount
+    def _archive_transactions(self) -> None:
+        """Archive old transactions to keep memory usage under control"""
+        with self._lock:
+            # Separate completed and uncompleted transactions
+            completed_txns = [txn for txn in self.transactions if txn.txn_status == TransactionStatus.COMPLETED]
+            uncompleted_txns = [txn for txn in self.transactions if txn.txn_status != TransactionStatus.COMPLETED]
+            
+            # Calculate how many completed transactions we can keep
+            remaining_slots = self._transaction_limit - len(uncompleted_txns)
+            
+            if remaining_slots > 0:
+                # Sort completed transactions by timestamp before archiving
+                completed_txns.sort(key=lambda txn: txn.timestamp)
+                # Keep the most recent completed transactions
+                recent_completed = completed_txns[-remaining_slots:]
+                # Get transactions to be archived
+                to_archive = completed_txns[:-remaining_slots]
                 
-            statement.append({
-                'transaction_id': txn.transaction_id,
-                'timestamp': txn.timestamp,
-                'type': txn.txn_type,
-                'amount': txn.amount,
-                'balance_after': running_balance,
-                'description': txn.description,
-                'status': txn.txn_status,
-                'error_message': txn.error_message
-            })
+                # Persist archived transactions
+                if to_archive:
+                    from SimpleBankingSystem.persistence import save_archived_transactions
+                    save_archived_transactions(self.account_id, to_archive)
+                
+                self.transactions = uncompleted_txns + recent_completed
+            else:
+                # If we have more uncompleted transactions than the limit, keep them all
+                self.transactions = uncompleted_txns
+
+    def get_balance(self) -> Decimal:
+        """Get the current account balance"""
+        with self._lock:
+            return self.account_balance
+
+    def get_statement(self, limit: Optional[int] = None, offset: int = 0) -> List[dict]:
+        """Get account statement with pagination, including archived transactions"""
+        with self._lock:
+            # Sort in-memory transactions by timestamp
+            sorted_in_memory = sorted(self.transactions, key=lambda txn: txn.timestamp)
+            in_memory_txns = sorted_in_memory[offset:offset + limit] if limit else sorted_in_memory
             
-        return statement
+            # If we need more transactions, load from archive
+            if limit and len(in_memory_txns) < limit:
+                from SimpleBankingSystem.persistence import load_archived_transactions
+                archived_txns = load_archived_transactions(self.account_id, limit - len(in_memory_txns), offset)
+                # Merge and sort transactions
+                all_txns = in_memory_txns + archived_txns
+                all_txns.sort(key=lambda txn: txn.timestamp)
+                in_memory_txns = all_txns[:limit]
+            
+            return [{
+                'timestamp': txn.timestamp.isoformat(),
+                'type': txn.txn_type.name,
+                'amount': float(txn.amount),
+                'balance_after': float(self.get_balance_at(txn.timestamp)),
+                'description': txn.description,
+                'status': txn.txn_status.name
+            } for txn in in_memory_txns]
+
+    def get_balance_at(self, timestamp: datetime) -> Decimal:
+        """Get the account balance at a specific timestamp"""
+        with self._lock:
+            balance = self.initial_balance
+            # Get all transactions up to the timestamp
+            all_txns = self.transactions + self._get_archived_transactions_before(timestamp)
+            # Sort all transactions by timestamp
+            all_txns.sort(key=lambda txn: txn.timestamp)
+            
+            for txn in all_txns:
+                if txn.timestamp <= timestamp and txn.txn_status == TransactionStatus.COMPLETED:
+                    balance += txn.amount
+            return balance
+
+    def _get_archived_transactions_before(self, timestamp: datetime) -> List[Transaction]:
+        """Get archived transactions before a specific timestamp"""
+        from SimpleBankingSystem.persistence import load_archived_transactions
+        # Load all archived transactions and filter by timestamp
+        archived_txns = load_archived_transactions(self.account_id, float('inf'), 0)
+        return [txn for txn in archived_txns if txn.timestamp <= timestamp]
+
+    def get_transaction_count(self) -> int:
+        """Get the total number of transactions including archived ones"""
+        with self._lock:
+            from SimpleBankingSystem.persistence import get_archived_transaction_count
+            return len(self.transactions) + get_archived_transaction_count(self.account_id)
 
     def __repr__(self):
-        return f"Account(id={self.account_id}, name={self.account_name}, balance={self.get_balance()}, updated_at={self.updated_at})"
+        return f"Account(id={self.account_id}, name={self.name}, balance={self.get_balance()}, updated_at={self.updated_at})"

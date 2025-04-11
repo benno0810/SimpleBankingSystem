@@ -1,8 +1,8 @@
 # commands.py
-from entities import Transaction, BankAccount
-from constants import TransactionType, TransactionStatus
-from persistence import load_accounts, save_accounts, save_transactions
 from abc import ABC, abstractmethod
+from SimpleBankingSystem.entities import Transaction, BankAccount
+from SimpleBankingSystem.persistence import load_accounts, save_accounts, save_transactions
+from SimpleBankingSystem.constants import TransactionType, TransactionStatus
 
 '''
 Transaction lifecycle:
@@ -25,7 +25,7 @@ class BaseCommand(ABC):
         Args:
             accounts: Optional dictionary of accounts to save. If None, will load from persistence.
         """
-        from persistence import save_accounts, save_transactions
+        from SimpleBankingSystem.persistence import save_accounts, save_transactions
         if accounts is None:
             accounts = load_accounts()
         save_accounts(accounts)
@@ -185,7 +185,7 @@ class CommandInvoker:
         return result
 
 if __name__ == "__main__":
-    from persistence import save_accounts, save_transactions
+    from SimpleBankingSystem.persistence import save_accounts, save_transactions
     accounts = {
         "acc1": BankAccount("acc1", "Alice", initial_balance=100),
         "acc2": BankAccount("acc2", "Bob", initial_balance=50)

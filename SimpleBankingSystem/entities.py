@@ -1,5 +1,5 @@
 # entities.py
-from typing import Dict, List, Optional, Set, Callable, Tuple
+from typing import Dict, List, Optional, Set, Callable, Tuple, Union
 from decimal import Decimal
 from datetime import datetime, timezone
 import uuid
@@ -262,7 +262,21 @@ class TransactionManager:
             self._transactions.clear()
 
 class BankAccount:
-    def __init__(self, name: str, initial_balance: Decimal, base_dir: str = None, account_id: str = None, created_at: datetime = None):
+    def __init__(self, name: str, initial_balance: Union[float, Decimal] = Decimal('0.00'), base_dir: str = None, account_id: str = None, created_at: datetime = None):
+        """Initialize a new bank account."""
+        if not name or not isinstance(name, str):
+            raise ValueError("Account name must be a non-empty string")
+        
+        # Convert float to Decimal if necessary
+        if isinstance(initial_balance, float):
+            initial_balance = Decimal(str(initial_balance))
+            
+        if initial_balance < 0:
+            raise ValueError("Initial balance cannot be negative")
+            
+        if initial_balance % Decimal('0.01') != 0:
+            raise ValueError("Initial balance must be in whole cents")
+
         self._account_id = account_id if account_id is not None else str(uuid.uuid4())
         self.name = name
         self.account_balance = initial_balance
@@ -272,12 +286,6 @@ class BankAccount:
         self._lock = threading.Lock()
         self._transaction_manager = TransactionManager()
         
-        # Validate initial balance
-        if initial_balance < 0:
-            raise ValueError("Initial balance cannot be negative")
-        if initial_balance % Decimal('0.01') != 0:
-            raise ValueError("Initial balance must be in whole cents")
-
         self._ensure_directory_exists()
         logger.info(f"Created new account: id={self._account_id}, name={name}, initial_balance={initial_balance}")
 

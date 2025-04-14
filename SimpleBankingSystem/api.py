@@ -110,6 +110,16 @@ class AccountList(Resource):
             logger.error('Failed to create account: %s', str(e))
             api.abort(400, str(e))
 
+    @accounts_ns.doc('method_not_allowed')
+    def put(self):
+        """PUT method not allowed"""
+        api.abort(405, 'Method not allowed')
+
+    @accounts_ns.doc('method_not_allowed')
+    def delete(self):
+        """DELETE method not allowed"""
+        api.abort(405, 'Method not allowed')
+
 @accounts_ns.route('/<string:account_id>/')
 @accounts_ns.param('account_id', 'The account identifier')
 class AccountDetail(Resource):

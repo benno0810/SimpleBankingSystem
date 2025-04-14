@@ -10,7 +10,12 @@ import csv
 
 from SimpleBankingSystem.entities import BankAccount, Transaction
 from SimpleBankingSystem.constants import TransactionType, TransactionStatus, ACCOUNTS_FILE, TRANSACTIONS_FILE
-from SimpleBankingSystem.commands import CommandFactory, load_accounts, ArchiveTransactionsCommand, DepositCommand, WithdrawCommand, TransferCommand, RetryTransactionCommand, CommandInvoker
+from SimpleBankingSystem.commands import (
+    CommandFactory, load_accounts, save_accounts, ArchiveTransactionsCommand,
+    DepositCommand, WithdrawCommand, TransferCommand, RetryTransactionCommand,
+    RetryFailedTransactionsCommand, CommandInvoker, load_archived_transactions,
+    CreateAccountCommand
+)
 from SimpleBankingSystem.logger import setup_logger
 # import logging
 # logger = setup_logger(level=logging.WARNING)
@@ -497,6 +502,192 @@ class TestCommands(unittest.TestCase):
 
     def test_withdraw_nonexistent_account(self):
         """Test withdraw from nonexistent account raises ValueError."""
+
+    def test_load_and_save_accounts(self):
+        """Test loading and saving accounts to/from CSV files."""
+        # Create test accounts
+        account1 = BankAccount("Test Account 1", Decimal("1000.00"))
+        account2 = BankAccount("Test Account 2", Decimal("500.00"))
+        accounts = {account1.account_id: account1, account2.account_id: account2}
+        
+        # Save accounts
+        save_accounts(accounts)
+        
+        # Load accounts
+        loaded_accounts = load_accounts()
+        
+        # Verify loaded accounts
+        self.assertEqual(len(loaded_accounts), 2)
+        self.assertIn(account1.account_id, loaded_accounts)
+        self.assertIn(account2.account_id, loaded_accounts)
+        self.assertEqual(loaded_accounts[account1.account_id].name, "Test Account 1")
+        self.assertEqual(loaded_accounts[account2.account_id].name, "Test Account 2")
+        self.assertEqual(loaded_accounts[account1.account_id].account_balance, Decimal("1000.00"))
+        self.assertEqual(loaded_accounts[account2.account_id].account_balance, Decimal("500.00"))
+
+    def test_archive_transactions_command(self):
+        """Test ArchiveTransactionsCommand."""
+        # Create account with multiple transactions
+        account = BankAccount("Test Account", Decimal("1000.00"))
+        
+        # Add transactions
+        for i in range(150):  # More than keep_last
+            cmd = DepositCommand(account, Decimal("10.00"))
+            result = cmd.execute()
+            transaction = account.get_transaction(result['transaction_id'])
+            # Don't change state - let it be COMPLETED from the command execution
+        
+        # Create and execute archive command
+        archive_cmd = ArchiveTransactionsCommand(account, keep_last=100)
+        result = archive_cmd.execute({account.account_id: account})
+        
+        # Verify results
+        self.assertTrue(result['success'])
+        self.assertEqual(len(account.transactions), 100)  # Should keep last 100
+        self.assertEqual(result['archived_count'], 50)    # Should archive 50
+        
+        # Verify archived transactions
+        archived_txns = load_archived_transactions(account.account_id)
+        self.assertEqual(len(archived_txns), 50)
+
+    def test_retry_transaction_command(self):
+        """Test RetryTransactionCommand."""
+        # Create account and failed transaction
+        account = BankAccount("Test Account", Decimal("1000.00"))
+        cmd = WithdrawCommand(account, Decimal("2000.00"))  # This will fail
+        try:
+            cmd.execute()
+        except ValueError:
+            pass  # Expected failure
+        
+        # Get the failed transaction
+        transaction = account.get_transaction(cmd.transaction.transaction_id)
+        self.assertIsNotNone(transaction)
+        self.assertEqual(transaction.txn_status, TransactionStatus.FAILED)
+        
+        # Create and execute retry command
+        retry_cmd = RetryTransactionCommand(transaction)
+        retry_result = retry_cmd.execute({account.account_id: account})
+        
+        # Verify results
+        self.assertFalse(retry_result['success'])  # Should still fail
+        self.assertEqual(transaction.retry_count, 1)
+
+    def test_retry_failed_transactions_command(self):
+        """Test RetryFailedTransactionsCommand."""
+        # Create account with multiple failed transactions
+        account = BankAccount("Test Account", Decimal("1000.00"))
+        
+        # Create failed transactions
+        for _ in range(3):
+            cmd = WithdrawCommand(account, Decimal("2000.00"))  # This will fail
+            try:
+                cmd.execute()
+            except ValueError:
+                pass  # Expected failure
+        
+        # Create and execute retry command
+        retry_cmd = RetryFailedTransactionsCommand(account)
+        result = retry_cmd.execute({account.account_id: account})
+        
+        # Verify results
+        self.assertEqual(result['retried_count'], 3)
+        self.assertEqual(result['success_count'], 0)  # All should still fail
+        for txn in account.transactions:
+            self.assertEqual(txn.retry_count, 1)
+
+    def test_command_factory(self):
+        """Test CommandFactory methods."""
+        # Create test accounts
+        account1 = BankAccount("Test Account 1", Decimal("1000.00"))
+        account2 = BankAccount("Test Account 2", Decimal("500.00"))
+        
+        # Test create account command
+        create_cmd = CommandFactory._create_account("New Account", Decimal("100.00"))
+        self.assertIsInstance(create_cmd, CreateAccountCommand)
+        
+        # Test deposit command
+        deposit_cmd = CommandFactory._deposit(account1, Decimal("100.00"))
+        self.assertIsInstance(deposit_cmd, DepositCommand)
+        
+        # Test withdraw command
+        withdraw_cmd = CommandFactory._withdraw(account1, Decimal("100.00"))
+        self.assertIsInstance(withdraw_cmd, WithdrawCommand)
+        
+        # Test transfer command
+        transfer_cmd = CommandFactory._transfer(account1, account2, Decimal("100.00"))
+        self.assertIsInstance(transfer_cmd, TransferCommand)
+        
+        # Test archive command
+        archive_cmd = CommandFactory._archive_transactions(account1)
+        self.assertIsInstance(archive_cmd, ArchiveTransactionsCommand)
+        
+        # Test retry commands
+        cmd = WithdrawCommand(account1, Decimal("2000.00"))  # This will fail
+        try:
+            cmd.execute()
+        except ValueError:
+            pass  # Expected failure
+        failed_transaction = account1.get_transaction(cmd.transaction.transaction_id)
+        self.assertIsNotNone(failed_transaction)
+        retry_cmd = CommandFactory._retry_transaction(failed_transaction)
+        self.assertIsInstance(retry_cmd, RetryTransactionCommand)
+        
+        retry_failed_cmd = CommandFactory._retry_failed_transactions(account1)
+        self.assertIsInstance(retry_failed_cmd, RetryFailedTransactionsCommand)
+
+    def test_command_invoker_singleton(self):
+        """Test CommandInvoker singleton pattern."""
+        invoker1 = CommandInvoker()
+        invoker2 = CommandInvoker()
+        self.assertIs(invoker1, invoker2)
+
+    def test_command_invoker_methods(self):
+        """Test CommandInvoker methods."""
+        # Create account
+        result = self.invoker.create_account("Test Account", Decimal("1000.00"))
+        account_id = result['account_id']
+        
+        # Test deposit
+        deposit_result = self.invoker.deposit(account_id, Decimal("100.00"))
+        self.assertTrue(deposit_result['success'])
+        
+        # Test withdraw
+        withdraw_result = self.invoker.withdraw(account_id, Decimal("50.00"))
+        self.assertTrue(withdraw_result['success'])
+        
+        # Test transfer
+        target_result = self.invoker.create_account("Target Account", Decimal("500.00"))
+        target_id = target_result['account_id']
+        transfer_result = self.invoker.transfer(account_id, target_id, Decimal("100.00"))
+        self.assertTrue(transfer_result['success'])
+        
+        # Test archive
+        archive_result = self.invoker.archive_transactions(account_id)
+        self.assertTrue(archive_result['success'])
+        
+        # Test retry
+        retry_result = self.invoker.retry_failed_transactions(account_id)
+        self.assertEqual(retry_result['retried_count'], 0)  # No failed transactions
+
+    def test_error_handling(self):
+        """Test error handling in commands."""
+        # Test invalid account ID
+        with self.assertRaises(ValueError):
+            self.invoker.deposit("invalid-id", Decimal("100.00"))
+        
+        # Test negative amount
+        account_id = self.invoker.create_account("Test Account", Decimal("1000.00"))['account_id']
+        with self.assertRaises(ValueError):
+            self.invoker.deposit(account_id, Decimal("-100.00"))
+        
+        # Test insufficient funds
+        with self.assertRaises(ValueError):
+            self.invoker.withdraw(account_id, Decimal("2000.00"))
+        
+        # Test self transfer
+        with self.assertRaises(ValueError):
+            self.invoker.transfer(account_id, account_id, Decimal("100.00"))
 
 if __name__ == '__main__':
     unittest.main() 

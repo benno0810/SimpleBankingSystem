@@ -1,6 +1,6 @@
 # commands.py
 from abc import ABC, abstractmethod
-from SimpleBankingSystem.entities import Transaction, BankAccount, TransactionEvent, TransactionManager
+from SimpleBankingSystem.entities import Transaction, BankAccount, TransactionEvent, TransactionManager, TransactionStateMachine
 from SimpleBankingSystem.constants import TransactionType, TransactionStatus, ACCOUNTS_FILE, TRANSACTIONS_FILE, ARCHIVED_TRANSACTIONS_FILE
 from SimpleBankingSystem.logger import logger
 import uuid
@@ -237,6 +237,15 @@ class WithdrawCommand(BaseCommand):
             if not self.transaction.start_processing():
                 raise Exception("Failed to start processing transaction")
             
+            # Check for sufficient funds
+            if self.amount > self.account.account_balance:
+                # Mark as failed
+                self.account.update_transaction_status(
+                    self.transaction.transaction_id,
+                    TransactionEvent.FAIL
+                )
+                raise ValueError("Insufficient funds")
+            
             # Complete the transaction and update balance
             if not self.account.update_transaction_status(
                 self.transaction.transaction_id,
@@ -369,6 +378,9 @@ class ArchiveTransactionsCommand(BaseCommand):
             # Write archived transactions to CSV
             archive_file = os.path.join(self.account.base_dir, 'transactions_archive.csv')
             try:
+                # Ensure base directory exists
+                os.makedirs(os.path.dirname(archive_file), exist_ok=True)
+                
                 file_exists = os.path.exists(archive_file)
                 with open(archive_file, 'a', newline='') as f:
                     writer = csv.DictWriter(f, fieldnames=['transaction_id', 'account_id', 'txn_type', 'amount', 'txn_status', 'created_at', 'updated_at'])
@@ -425,15 +437,69 @@ class RetryTransactionCommand(BaseCommand):
         
     def execute(self, accounts: Dict[str, BankAccount]) -> dict:
         """Execute the retry command"""
-        if not self.transaction.retry():
-            raise ValueError("Transaction cannot be retried")
+        if self.transaction.retry_count >= self.transaction.max_retries:
+            raise ValueError("Transaction has reached maximum retry attempts")
+            
+        if self.transaction.txn_status != TransactionStatus.FAILED:
+            raise ValueError("Can only retry failed transactions")
+            
+        # Get the account
+        account = accounts.get(self.transaction.account_id)
+        if not account:
+            raise ValueError(f"Account {self.transaction.account_id} not found")
+            
+        # Reset the transaction state
+        self.transaction.state_machine = TransactionStateMachine()
+        self.transaction.retry_count += 1
         
-        return {
-            'success': True,
-            'transaction_id': self.transaction.transaction_id,
-            'new_status': self.transaction.txn_status.name,
-            'retry_count': self.transaction.retry_count
-        }
+        # Start processing again
+        if not self.transaction.start_processing():
+            raise Exception("Failed to start processing transaction")
+            
+        # Try to complete the transaction
+        try:
+            # Check for sufficient funds if it's a withdrawal or transfer out
+            if self.transaction.txn_type in [TransactionType.WITHDRAW, TransactionType.TRANSFER_OUT]:
+                if self.transaction.amount > account.account_balance:
+                    # Mark as failed
+                    account.update_transaction_status(
+                        self.transaction.transaction_id,
+                        TransactionEvent.FAIL
+                    )
+                    return {
+                        'success': False,
+                        'transaction_id': self.transaction.transaction_id,
+                        'new_status': self.transaction.txn_status.name,
+                        'retry_count': self.transaction.retry_count,
+                        'error': "Insufficient funds"
+                    }
+            
+            # Complete the transaction
+            if not account.update_transaction_status(
+                self.transaction.transaction_id,
+                TransactionEvent.COMPLETE
+            ):
+                raise Exception("Failed to complete transaction")
+                
+            return {
+                'success': True,
+                'transaction_id': self.transaction.transaction_id,
+                'new_status': self.transaction.txn_status.name,
+                'retry_count': self.transaction.retry_count
+            }
+        except Exception as e:
+            # If anything fails, mark the transaction as failed again
+            account.update_transaction_status(
+                self.transaction.transaction_id,
+                TransactionEvent.FAIL
+            )
+            return {
+                'success': False,
+                'transaction_id': self.transaction.transaction_id,
+                'new_status': self.transaction.txn_status.name,
+                'retry_count': self.transaction.retry_count,
+                'error': str(e)
+            }
 
 class RetryFailedTransactionsCommand(BaseCommand):
     """Command to retry all failed transactions for an account"""
@@ -445,6 +511,7 @@ class RetryFailedTransactionsCommand(BaseCommand):
         Args:
             account: BankAccount to retry failed transactions for
         """
+        super().__init__()
         self.account = account
         
     def execute(self, accounts: Dict[str, BankAccount]) -> Dict:
@@ -455,23 +522,34 @@ class RetryFailedTransactionsCommand(BaseCommand):
         results = {
             'success': True,
             'retried_count': 0,
+            'success_count': 0,
             'failed_count': 0,
             'transaction_results': {}
         }
         
-        for txn in self.account.get_transactions():
-            if txn.txn_status == TransactionStatus.FAILED and txn.retry_count < 3:
-                try:
-                    retry_cmd = RetryTransactionCommand(txn)
-                    result = retry_cmd.execute(accounts)
-                    results['retried_count'] += 1
-                    results['transaction_results'][txn.transaction_id] = result
-                except Exception as e:
+        # Get all failed transactions
+        failed_transactions = [
+            txn for txn in self.account.get_transactions()
+            if txn.txn_status == TransactionStatus.FAILED and txn.retry_count < txn.max_retries
+        ]
+        
+        # Retry each failed transaction
+        for txn in failed_transactions:
+            try:
+                retry_cmd = RetryTransactionCommand(txn)
+                result = retry_cmd.execute(accounts)
+                results['retried_count'] += 1
+                if result['success']:
+                    results['success_count'] += 1
+                else:
                     results['failed_count'] += 1
-                    results['transaction_results'][txn.transaction_id] = {
-                        'success': False,
-                        'error': str(e)
-                    }
+                results['transaction_results'][txn.transaction_id] = result
+            except Exception as e:
+                results['failed_count'] += 1
+                results['transaction_results'][txn.transaction_id] = {
+                    'success': False,
+                    'error': str(e)
+                }
         
         return results
 
@@ -486,8 +564,15 @@ def load_archived_transactions(account_id: str) -> List[Transaction]:
     """
     transactions = []
     try:
-        if os.path.exists(ARCHIVED_TRANSACTIONS_FILE):
-            with open(ARCHIVED_TRANSACTIONS_FILE, 'r', newline='') as f:
+        # Get the account's base directory from the accounts file
+        accounts = load_accounts()
+        account = accounts.get(account_id)
+        if not account:
+            raise ValueError(f"Account {account_id} not found")
+            
+        archive_file = os.path.join(account.base_dir, 'transactions_archive.csv')
+        if os.path.exists(archive_file):
+            with open(archive_file, 'r', newline='') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     if row['account_id'] == account_id:
@@ -745,7 +830,7 @@ class CommandFactory:
         Returns:
             RetryTransactionCommand instance
         """
-        if transaction.status != TransactionStatus.FAILED:
+        if transaction.txn_status != TransactionStatus.FAILED:
             raise ValueError("Can only retry failed transactions")
         return RetryTransactionCommand(transaction)
         

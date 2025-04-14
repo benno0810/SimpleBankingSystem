@@ -8,8 +8,8 @@ import uuid
 import csv
 import tempfile
 
-from SimpleBankingSystem.entities import BankAccount, Transaction, TransactionEvent
-from SimpleBankingSystem.constants import TransactionType, TransactionStatus, ACCOUNTS_FILE, TRANSACTIONS_FILE
+from SimpleBankingSystem.entities import BankAccount, Transaction, TransactionEvent, TransactionStatus, TransactionType, TransactionStateMachine
+from SimpleBankingSystem.constants import ACCOUNTS_FILE, TRANSACTIONS_FILE
 
 class TestBankAccount(unittest.TestCase):
     """Test cases for the BankAccount class"""
@@ -459,6 +459,179 @@ class TestTransaction(unittest.TestCase):
             
         with self.assertRaises(ValueError):
             txn.retry()  # Cannot retry a pending transaction
+
+class TestEntities(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.account = BankAccount("Test Account", Decimal("1000.00"), base_dir=self.temp_dir)
+
+    def tearDown(self):
+        try:
+            os.rmdir(self.temp_dir)
+        except FileNotFoundError:
+            pass
+
+    def test_transaction_state_machine_handlers(self):
+        """Test adding and removing state handlers"""
+        state_machine = TransactionStateMachine()
+        
+        # Test handler function
+        def test_handler(old_state, new_state):
+            self.called_states = (old_state, new_state)
+        
+        # Add handler
+        state_machine.add_state_handler(TransactionStatus.PROCESSING, test_handler)
+        
+        # Trigger transition
+        state_machine.transition(TransactionEvent.START_PROCESSING)
+        
+        # Verify handler was called
+        self.assertEqual(self.called_states[0], TransactionStatus.PENDING)
+        self.assertEqual(self.called_states[1], TransactionStatus.PROCESSING)
+        
+        # Remove handler
+        state_machine.remove_state_handler(TransactionStatus.PROCESSING, test_handler)
+        
+        # Verify handler is removed
+        handlers = state_machine._state_handlers[TransactionStatus.PROCESSING]
+        self.assertEqual(len(handlers), 0)
+
+    def test_transaction_retry_max_attempts(self):
+        """Test transaction retry with max attempts exceeded"""
+        transaction = Transaction(
+            txn_type=TransactionType.WITHDRAW,
+            amount=Decimal("100.00"),
+            account_id=self.account.account_id
+        )
+        
+        # Set retry count to max
+        transaction.retry_count = transaction.max_retries
+        
+        # Try to retry
+        with self.assertRaises(ValueError):
+            transaction.retry()
+
+    def test_transaction_cancel(self):
+        """Test transaction cancellation"""
+        transaction = Transaction(
+            txn_type=TransactionType.DEPOSIT,
+            amount=Decimal("100.00"),
+            account_id=self.account.account_id
+        )
+        
+        # Cancel from PENDING state
+        self.assertTrue(transaction.cancel())
+        self.assertEqual(transaction.txn_status, TransactionStatus.FAILED)
+        
+        # Try to cancel from FAILED state (should raise error)
+        with self.assertRaises(ValueError):
+            transaction.cancel()
+
+    def test_bank_account_float_initial_balance(self):
+        """Test creating bank account with float initial balance"""
+        account = BankAccount("Test Account", 100.00)
+        self.assertEqual(account.account_balance, Decimal("100.00"))
+
+    def test_bank_account_invalid_initial_balance(self):
+        """Test creating bank account with invalid initial balance"""
+        # Test negative balance
+        with self.assertRaises(ValueError):
+            BankAccount("Test Account", Decimal("-100.00"))
+        
+        # Test fractional cents
+        with self.assertRaises(ValueError):
+            BankAccount("Test Account", Decimal("100.001"))
+
+    def test_bank_account_get_balance_at(self):
+        """Test getting historical balance"""
+        # Create transactions at different times
+        now = datetime.now(timezone.utc)
+        
+        # Add deposit
+        deposit = Transaction(TransactionType.DEPOSIT, Decimal("100.00"), self.account.account_id)
+        deposit.created_at = now - timedelta(days=2)
+        self.account.add_transaction(deposit)
+        self.account.update_transaction_status(deposit.transaction_id, TransactionEvent.START_PROCESSING)
+        self.account.update_transaction_status(deposit.transaction_id, TransactionEvent.COMPLETE)
+        
+        # Add withdrawal
+        withdraw = Transaction(TransactionType.WITHDRAW, Decimal("50.00"), self.account.account_id)
+        withdraw.created_at = now - timedelta(days=1)
+        self.account.add_transaction(withdraw)
+        self.account.update_transaction_status(withdraw.transaction_id, TransactionEvent.START_PROCESSING)
+        self.account.update_transaction_status(withdraw.transaction_id, TransactionEvent.COMPLETE)
+        
+        # Check balance at different times
+        self.assertEqual(
+            self.account.get_balance_at(now - timedelta(days=3)),
+            Decimal("0.00")
+        )
+        self.assertEqual(
+            self.account.get_balance_at(now - timedelta(days=1.5)),
+            Decimal("100.00")
+        )
+        self.assertEqual(
+            self.account.get_balance_at(now),
+            Decimal("50.00")
+        )
+
+    def test_bank_account_calculate_effective_amount(self):
+        """Test calculating effective amount for different transaction types"""
+        # Test deposit
+        deposit = Transaction(TransactionType.DEPOSIT, Decimal("100.00"), self.account.account_id)
+        self.assertEqual(
+            self.account.calculate_effective_amount(deposit),
+            Decimal("100.00")
+        )
+        
+        # Test withdrawal
+        withdraw = Transaction(TransactionType.WITHDRAW, Decimal("50.00"), self.account.account_id)
+        self.assertEqual(
+            self.account.calculate_effective_amount(withdraw),
+            Decimal("-50.00")
+        )
+        
+        # Test transfer in
+        transfer_in = Transaction(TransactionType.TRANSFER_IN, Decimal("75.00"), self.account.account_id)
+        self.assertEqual(
+            self.account.calculate_effective_amount(transfer_in),
+            Decimal("75.00")
+        )
+        
+        # Test transfer out
+        transfer_out = Transaction(TransactionType.TRANSFER_OUT, Decimal("25.00"), self.account.account_id)
+        self.assertEqual(
+            self.account.calculate_effective_amount(transfer_out),
+            Decimal("-25.00")
+        )
+
+    def test_bank_account_get_transactions_with_time_range(self):
+        """Test getting transactions within a time range"""
+        now = datetime.now(timezone.utc)
+        
+        # Create transactions at different times
+        for i in range(5):
+            txn = Transaction(
+                TransactionType.DEPOSIT,
+                Decimal("10.00"),
+                self.account.account_id
+            )
+            txn.created_at = now - timedelta(days=i)
+            self.account.add_transaction(txn)
+        
+        # Get transactions from last 2 days
+        transactions = self.account.get_transactions(
+            start_time=now - timedelta(days=2),
+            end_time=now
+        )
+        self.assertEqual(len(transactions), 3)
+        
+        # Get transactions from last week
+        transactions = self.account.get_transactions(
+            start_time=now - timedelta(days=7),
+            end_time=now
+        )
+        self.assertEqual(len(transactions), 5)
 
 if __name__ == '__main__':
     unittest.main() 

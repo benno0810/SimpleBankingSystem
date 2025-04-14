@@ -1,9 +1,18 @@
 # No external dependencies required
 # Python 3.7 or higher is required
 
-coverage
-flask==2.0.1
+# Core dependencies
+flask==2.3.3
 flask-restful==0.3.9
+flask-restx==1.1.0  # Replacing flask-restplus which is deprecated
 python-dotenv==0.19.0
+werkzeug==2.3.7  # Required for Flask 2.3.3
+
+# Testing
 pytest==6.2.5
 pytest-cov==2.12.1
+coverage==6.5.0
+
+# Development tools
+black==21.5b2
+flake8==3.9.2

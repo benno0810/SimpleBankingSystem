@@ -542,7 +542,7 @@ class TestEntities(unittest.TestCase):
         with self.assertRaises(ValueError):
             BankAccount("Test Account", Decimal("100.001"))
 
-     def test_bank_account_get_balance_at(self):
+    def test_bank_account_get_balance_at(self):
         """Test getting historical balance"""
         # Create transactions at different times
         now = datetime.now(timezone.utc)

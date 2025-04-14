@@ -1,5 +1,7 @@
 # Simple Banking System
 
+[![Test Coverage](https://github.com/benno0810/SimpleBankingSystem/actions/workflows/coverage.yml/badge.svg)](https://github.com/benno0810/SimpleBankingSystem/actions/workflows/coverage.yml)
+
 A RESTful API for a simple banking system built with Flask and Flask-RESTX.
 
 ## Table of Contents
@@ -58,24 +60,6 @@ flask run
 ```
 
 Note: Always make sure you're in the virtual environment (you should see `(venv)` at the start of your prompt) before running any Python commands.
-
-## API Documentation
-
-To verify that all dependencies are installed correctly:
-
-```powershell
-# Check Flask installation
-python -c "import flask; print(flask.__version__)"
-
-# Check Flask-RESTX installation
-python -c "import flask_restx; print(flask_restx.__version__)"
-
-# Check pytest installation
-python -c "import pytest; print(pytest.__version__)"
-
-# Check coverage installation
-python -c "import coverage; print(coverage.__version__)"
-```
 
 ## API Documentation
 

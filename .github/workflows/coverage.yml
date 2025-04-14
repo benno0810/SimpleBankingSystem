@@ -1,3 +1,4 @@
+
 name: Test Coverage
 
 on:
@@ -21,14 +22,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install -r requirements.txt
           pip install pytest pytest-cov
-
+      - name: Create data directory
+        run: |
+          mkdir -p data
+          mkdir -p SimpleBankingSystem/data
       - name: Run tests with coverage
         run: |
-          pytest --cov=SimpleBankingSystem --cov-report=xml tests/
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+          cd SimpleBankingSystem
+          pytest --cov=. --cov-report=xml --cov-report=term tests/
+          # Move coverage.xml to the root directory
+          mv coverage.xml ../coverage.xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
         with:
-          file: ./coverage.xml
-          fail_ci_if_error: true
+          name: coverage-report
+          path: coverage.xml

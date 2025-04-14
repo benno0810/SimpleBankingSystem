@@ -1,5 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.env
+*.log
+
+# IDE
+.idea/
+.vscode/
+.history/
+*.swp
+*.swo
+
+# Project specific
+data/
+example project/
+*.drawio
+plan.txt
+SimpleBankingSystem/swagger/
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Misc
+.DS_Store
+Thumbs.db
+
 SimpleBankingSystem/accounts.csv
 SimpleBankingSystem/transactions.csv
-SimpleBankingSystem/__pycache__
 SimpleBankingSystem/*.pyc
 ReadMe.md

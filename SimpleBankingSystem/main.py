@@ -1,6 +1,7 @@
 # main.py
-from persistence import load_accounts, load_transactions, save_accounts, save_transactions
-from commands import DepositCommand, WithdrawCommand, TransferCommand, CommandInvoker
+from SimpleBankingSystem.commands import load_accounts, load_transactions, save_accounts, save_transactions
+from SimpleBankingSystem.app import app
+from commands import CommandFactory, CommandInvoker
 from entities import BankAccount
 from decimal import Decimal
 
@@ -29,13 +30,13 @@ def main():
 
     # Demonstrate new operations.
     print("\nPerforming new operations...")
-    deposit_cmd = DepositCommand(accounts["acc1"], 50)
+    deposit_cmd = invoker.factory.deposit(accounts["acc1"], Decimal("50.00"))
     invoker.execute_command(deposit_cmd)
 
-    withdraw_cmd = WithdrawCommand(accounts["acc1"], 30)
+    withdraw_cmd = invoker.factory.withdraw(accounts["acc1"], Decimal("30.00"))
     invoker.execute_command(withdraw_cmd)
 
-    transfer_cmd = TransferCommand(accounts["acc1"], accounts["acc2"], 40)
+    transfer_cmd = invoker.factory.transfer(accounts["acc1"], accounts["acc2"], Decimal("40.00"))
     invoker.execute_command(transfer_cmd)
 
     # Persist the updated state.

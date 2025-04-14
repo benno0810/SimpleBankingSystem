@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  banking-api:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data # Mount data directory for persistence
+    environment:
+      - PYTHONPATH=/app
+      - DATA_DIR=/app/data
+      - FLASK_APP=SimpleBankingSystem.app
+      - FLASK_ENV=development
+    command: flask run --host=0.0.0.0
